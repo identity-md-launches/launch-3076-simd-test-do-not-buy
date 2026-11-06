@@ -1,0 +1,30 @@
+{
+  "kind": "univ4_hook",
+  "hook": {
+    "contract": "TestHook",
+    "constructorArgs": [
+      "$poolManager",
+      "$token"
+    ],
+    "permissions": [
+      "beforeInitialize",
+      "beforeSwap",
+      "afterSwap",
+      "beforeSwapReturnDelta",
+      "afterSwapReturnDelta"
+    ]
+  },
+  "token": {
+    "contract": "TestToken",
+    "name": "SIMD TEST - DO NOT BUY",
+    "symbol": "SIMDTEST",
+    "decimals": 18
+  },
+  "pool": {
+    "pairedCurrency": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127",
+    "fee": 12500,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "TEST TOKEN ONLY: no value; must not be bought. Logo: https://www.si-md.xyz/logo.jpg. TestToken has no constructor arguments. TestHook binds to this launch's SIMDTEST/IMD pool on Robinhood Chain. It charges a constant 0.75% of filled gross IMD on buys and sells, rounded down to IMD minor units, and pays only 0xdfa1f1f6feaa04f7874eff0b7754b7ffaebd8bc0 in IMD, with no ETH conversion. Failed payouts become IMD-denominated ERC-6909 claims held by the hook on the same PoolManager; anyone may call redeemFees(), which pays only that fixed recipient. Wallet delivery can therefore be deferred. The pool's 1.25% LP fee plus the hook's 0.75% is 2% nominal; sequential assessment on different bases means the effective combined charge can differ. beforeInitialize accepts only the immutable PoolManager and validates the complete pool key, including fee 12500 and tick spacing 60; swap callbacks also enforce that manager and pool. beforeSwapReturnDelta handles specified-IMD fees using a reverted quote of the actual fill; afterSwapReturnDelta handles unspecified-IMD fees. There is no owner, admin, setter, upgrade, pause, blacklist, anti-sniper tax, or time/block-dependent rate. No liquidity or donation permissions are enabled. The listed initialPrice is the launch reference value; the deployer derives the actual opening price from launch policy and token ordering. No additional contracts are deployed by TestHook."
+}
