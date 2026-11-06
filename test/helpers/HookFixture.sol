@@ -52,9 +52,16 @@ abstract contract HookFixture is Test {
     }
 
     function _setUp(bool pairFirst, bool forked) internal {
+        _setUpOn(pairFirst, forked, IPoolManager(address(0)));
+    }
+
+    /// @dev `existing` is a deployed PoolManager (the live one on a fork); zero deploys a fresh one.
+    function _setUpOn(bool pairFirst, bool forked, IPoolManager existing) internal {
         if (!forked) vm.etch(IMD, address(new MockIMD()).code);
         assertGt(IMD.code.length, 0, "IMD must exist");
-        manager = new PoolManager(address(this));
+        manager = address(existing) == address(0)
+            ? IPoolManager(address(new PoolManager(address(this))))
+            : existing;
         do {
             token = new TestToken();
         } while ((IMD < address(token)) != pairFirst);
