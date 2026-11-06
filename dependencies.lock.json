@@ -1,0 +1,30 @@
+[
+  {
+    "repository": "https://github.com/Uniswap/v4-core",
+    "commit": "bea7f6d1c11cd5dc4f0d5151ffa37a1c239feee6",
+    "archive_sha256": "006184110dd9af72e11035abf9b64ae0bfaa6d1a3771c7b8d57b8f310591d972",
+    "directory": "lib/v4-core",
+    "files": 46
+  },
+  {
+    "repository": "https://github.com/foundry-rs/forge-std",
+    "commit": "77041d2ce690e692d6e03cc812b57d1ddaa4d505",
+    "archive_sha256": "a387f7c2a10387f889b0d18b999cfa667a5273ac11cc11e18923022eb8b24bc3",
+    "directory": "lib/forge-std",
+    "files": 30
+  },
+  {
+    "repository": "https://github.com/OpenZeppelin/openzeppelin-contracts",
+    "commit": "69c8def5f222ff96f2b5beff05dfba996368aa79",
+    "archive_sha256": "b0d8bc73b249cee906d596cf8e63c6ea71a4311c4e2a45a0b253e060d6dd3ae8",
+    "directory": "lib/openzeppelin-contracts",
+    "files": 178
+  },
+  {
+    "repository": "https://github.com/transmissions11/solmate",
+    "commit": "89365b880c4f3c786bdd453d4b8e8fe410344a69",
+    "archive_sha256": "8a823fec83181106fdae58528f20203b7563aceaf077fc317f01ae18a229f235",
+    "directory": "lib/solmate",
+    "files": 60
+  }
+]
