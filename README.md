@@ -108,17 +108,29 @@ No user identity, router allowlist, timestamp, block number, external oracle, or
 `hookData` enters the fee calculation. The `sender` and `hookData` cannot select
 another recipient or rate.
 
-### Payout failures
+### Payout path
 
 Normally the PoolManager transfers IMD directly to the fixed recipient within
-the swap. The hook never needs to receive IMD itself. Input settlement can occur
-after the callback, so a manager seeded with SIMDTEST only might not yet have
-enough IMD for the fee. A token-level restriction might also reject the payout.
+the swap. The hook never needs to receive IMD itself. Two situations defer the
+delivery instead; in both the fee is still charged in full during the swap and
+is held as an **IMD-denominated ERC-6909 claim on the same PoolManager**, owned
+by the hook exclusively for the same recipient:
 
-If `take` fails, the hook instead mints an **IMD-denominated ERC-6909 claim on the
-same PoolManager**, held by the hook exclusively for the same recipient. The fee
-is still charged and fully accounted for; its wallet delivery is deferred. This
-path does not deploy a helper or convert to ETH. `FeeCharged(amount, deferred)`
+1. **The caller has IMD synced.** `settle()` credits an ERC-20 payer with the
+   manager's balance minus the reserves recorded by its last `sync()`. A caller
+   that pays before the swap (`sync` → `transfer` → `swap` → `settle`) still has
+   that window open while the hook runs, so a `take` of IMD inside it would
+   shrink the caller's credit by the fee: the buy would revert `CurrencyNotSettled`
+   or the caller would pay the fee twice. The hook therefore checks the manager's
+   synced currency and mints the claim instead whenever it is IMD. Callers that
+   swap first and settle afterwards (Uniswap's V4Router and Universal Router) are
+   unaffected and keep direct delivery; sells sync SIMDTEST, so they are too.
+2. **`take` fails.** Input settlement can occur after the callback, so a manager
+   seeded with SIMDTEST only might not yet hold enough IMD, or a token-level
+   restriction might reject the payout. A reverted `take` rolls back its own
+   delta; the hook then mints the same claim.
+
+Neither path deploys a helper or converts to ETH. `FeeCharged(amount, deferred)`
 identifies which path occurred.
 
 Anyone can call `redeemFees()` outside an existing manager unlock. It burns
@@ -146,11 +158,17 @@ Local tests use the vendored, unmodified v4 PoolManager with both token ordering
 They cover all four swap modes, tiny trades, partial fills, absent liquidity,
 failed input settlement, restricted payouts, empty-manager funding, deferred
 claim redemption, unauthorized callbacks, attempted admin/redirection calls,
-time independence, factory fee collection and LP withdrawal. Fuzz tests run
-1,000 cases each. The final offline run passed 38 tests, with the fork suite
-explicitly skipped. The stateful invariant handler mixes trades, payout failure
-and redemption; it checks fee and token conservation, fixed supply, fixed
-recipient/rate, and zero outstanding transient manager deltas.
+time independence, factory fee collection and LP withdrawal. Settlement order is
+covered both ways: the driver settles after the swap like V4Router, and a
+prepaid mode pays inside one sync window that brackets the swap and requires
+`settle()` to credit exactly what was transferred with no debt left over. The
+exact-output sell bound is tested at `type(int256).max` (named revert), at the
+bound itself and at `type(int128).max` (identical fills and fee). Fuzz tests run
+1,000 cases each. The final offline run passed 48 tests, with the fork suite
+explicitly skipped. The stateful invariant handler mixes trades in both
+settlement orders, payout failure and redemption; it checks fee and token
+conservation, fixed supply, fixed recipient/rate, and zero outstanding transient
+manager deltas.
 
 The fork suite is explicitly skipped when no fork is selected, keeping normal
 `forge test` usable offline. It never silently treats missing RPC as a passed
@@ -160,16 +178,19 @@ fork test. To run it against the documented public source:
 FOUNDRY_FUZZ_SEED=0x88c525739d5cda97c5391be726bb7a4eb3938ccbb5924d57ded94b46769db829 \
   forge test --match-contract RobinhoodForkTest \
   --fork-url https://rpc.mainnet.chain.robinhood.com \
-  --fork-block-number 107794459 -vv
+  --fork-block-number 107846725 -vv
 ```
 
-The recorded fork at block **107794459**, hash
-`0xba32a1708ef2a683be75e9960ad04e80c48e7dbe2f7b31e472ec7c663d59bccf`, passed all
-16 tests including two 1,000-case fuzz tests. IMD's deployed code, symbol `IMD`
-and 18 decimals were checked on that chain. Test balances are assigned with
-Foundry cheats; IMD code is not replaced on the fork. The fork deploys a fresh
-canonical v4 PoolManager and the proposed launch contracts locally. It does not
-broadcast or claim to rehearse an unspecified deployed factory/router.
+The recorded fork at block **107846725**, hash
+`0x9fda20125b57195e5ad58b16c72f6481a494bb0c9585132ca39036408f0e4f0f`, passed all
+21 tests including two 1,000-case fuzz tests. The public RPC keeps a limited
+history of state: a block more than a few days old answers "historical state is
+not available", so re-pin `--fork-block-number` to a recent block when rerunning.
+IMD's deployed code, symbol `IMD` and 18 decimals were checked on that chain.
+Test balances are assigned with Foundry cheats; IMD code is not replaced on the
+fork. The fork deploys a fresh canonical v4 PoolManager and the proposed launch
+contracts locally. It does not broadcast or claim to rehearse an unspecified
+deployed factory/router.
 
 ## After launch
 
@@ -188,9 +209,15 @@ loses the ability to receive IMD. Unsolicited ERC-20 transfers to the hook have
 no rescue function; do not send tokens there directly.
 
 The no-swap-blocking property means there are no hook trading gates and payout
-failure cannot veto a valid, funded v4 trade. Core invalid-price/amount errors,
-insufficient trader funds, token restrictions affecting actual trade settlement,
-out-of-gas, and v4's signed arithmetic limits can still revert a transaction.
+failure cannot veto a valid, funded v4 trade, whichever order the caller settles
+in. Core invalid-price/amount errors, insufficient trader funds, token
+restrictions affecting actual trade settlement, out-of-gas, and v4's signed
+arithmetic limits can still revert a transaction. One such limit is named by the
+hook: an exact-output sell whose requested net IMD exceeds
+`MAX_EXACT_OUTPUT_SELL` (`type(int256).max - type(int128).max`) reverts with
+`ExactOutputTooLarge`, because v4 adds the hook's fee to the request with checked
+arithmetic. No pool can fill such an order; `type(int128).max` expresses the same
+"sell to the price limit" order and fills with the same fee.
 IMD itself is an external dependency; this hook cannot remove powers or transfer
 restrictions in that token or the PoolManager. The deployer must verify the
 supplied manager implements the pinned v4 interfaces and supports Cancun.

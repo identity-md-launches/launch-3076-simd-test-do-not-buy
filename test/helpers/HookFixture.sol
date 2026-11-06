@@ -47,7 +47,8 @@ abstract contract HookFixture is Test {
         BalanceDelta userDelta;
         int128 coreImd;
         int128 coreToken;
-        uint256 paid;
+        uint256 paid; // IMD delivered to the recipient's wallet during the swap
+        uint256 deferred; // IMD kept as the hook's ERC-6909 claim during the swap
     }
 
     function _setUp(bool pairFirst, bool forked) internal {
@@ -108,15 +109,37 @@ abstract contract HookFixture is Test {
         return SwapParams(zeroForOne, exactInput ? -int256(amount) : int256(amount), limit);
     }
 
+    /// @dev Swaps first, then settles (the V4Router order).
     function _trade(bool buy, bool exactInput, uint256 amount, bool partialFill, bytes memory hookData)
         internal
+        returns (Trade memory)
+    {
+        return _execute(_params(buy, exactInput, amount, partialFill), hookData, 0);
+    }
+
+    /// @dev Pays `prepay` of the input currency before the swap, inside one sync window that brackets it.
+    function _prepaidTrade(bool buy, bool exactInput, uint256 amount, uint256 prepay)
+        internal
+        returns (Trade memory)
+    {
+        return _execute(_params(buy, exactInput, amount, false), "", prepay);
+    }
+
+    function _execute(SwapParams memory params, bytes memory hookData, uint256 prepay)
+        private
         returns (Trade memory result)
     {
         uint256 beforeFee = IERC20(IMD).balanceOf(RECIPIENT);
+        uint256 beforeClaim = manager.balanceOf(address(hook), uint160(IMD));
         uint256 beforeImd = IERC20(IMD).balanceOf(address(trader));
         uint256 beforeToken = token.balanceOf(address(trader));
         vm.recordLogs();
-        result.userDelta = trader.swap(key, _params(buy, exactInput, amount, partialFill), hookData);
+        if (prepay == 0) {
+            result.userDelta = trader.swap(key, params, hookData);
+        } else {
+            Currency input = Currency.wrap(params.zeroForOne == imd0 ? IMD : address(token));
+            result.userDelta = trader.swapPrepaid(key, params, input, prepay);
+        }
         Vm.Log[] memory logs = vm.getRecordedLogs();
         uint256 coreEvents;
         for (uint256 i; i < logs.length; ++i) {
@@ -132,6 +155,7 @@ abstract contract HookFixture is Test {
         // recordLogs can observe a reverted quote's log too. The final log is the actual swap.
         assertGe(coreEvents, 1);
         result.paid = IERC20(IMD).balanceOf(RECIPIENT) - beforeFee;
+        result.deferred = manager.balanceOf(address(hook), uint160(IMD)) - beforeClaim;
         int128 userImd = imd0 ? result.userDelta.amount0() : result.userDelta.amount1();
         int128 userToken = imd0 ? result.userDelta.amount1() : result.userDelta.amount0();
         assertEq(int256(IERC20(IMD).balanceOf(address(trader))) - int256(beforeImd), userImd);
@@ -145,8 +169,9 @@ abstract contract HookFixture is Test {
     function _assertFee(Trade memory result, bool buy) internal view {
         int128 userImd = imd0 ? result.userDelta.amount0() : result.userDelta.amount1();
         uint256 gross = buy ? uint256(-int256(userImd)) : uint256(int256(result.coreImd));
-        assertEq(result.paid, gross * 75 / 10_000, "fee must be 0.75% of filled gross IMD");
-        assertEq(int256(result.coreImd) - int256(userImd), int256(result.paid), "fee conservation");
+        uint256 fee = result.paid + result.deferred;
+        assertEq(fee, gross * 75 / 10_000, "fee must be 0.75% of filled gross IMD");
+        assertEq(int256(result.coreImd) - int256(userImd), int256(fee), "fee conservation");
         assertEq(IERC20(IMD).balanceOf(address(hook)), 0, "IMD left in hook");
         assertEq(token.balanceOf(RECIPIENT), 0, "recipient received launch tokens");
         assertEq(address(hook).balance, 0);

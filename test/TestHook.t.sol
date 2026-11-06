@@ -8,6 +8,7 @@ import {PoolManager} from "v4-core/src/PoolManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {TestHook} from "../src/TestHook.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
+import {CustomRevert} from "v4-core/src/libraries/CustomRevert.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
@@ -67,6 +68,81 @@ abstract contract HookScenarios is HookFixture {
             buy == exactInput ? (imd0 ? r.userDelta.amount0() : r.userDelta.amount1()) : r.coreToken;
         uint256 used = specified < 0 ? uint256(-int256(specified)) : uint256(int256(specified));
         assertLt(used, size, "expected a partial fill");
+    }
+
+    /// A caller that syncs IMD, pays, swaps and settles once is credited everything it transferred:
+    /// the hook must not take IMD out of the manager inside that caller's sync window.
+    function test_prepaidExactInputBuyPaysOnlyItsBudget() public {
+        Trade memory r = _prepaidTrade(true, true, 1000 ether, 1000 ether);
+        _assertFee(r, true);
+        assertEq(imd0 ? r.userDelta.amount0() : r.userDelta.amount1(), -1000 ether);
+        assertGt(r.coreToken, 0);
+        assertEq(r.paid, 0, "taking IMD inside the sync window would under-credit the buyer");
+        assertEq(r.deferred, 7.5 ether);
+        assertEq(hook.redeemFees(), 7.5 ether);
+        assertEq(IERC20(IMD).balanceOf(RECIPIENT) - initialRecipient, 7.5 ether);
+        assertEq(manager.balanceOf(address(hook), uint160(IMD)), 0);
+    }
+
+    /// Prepaying a maximum and taking the surplus back must cost exactly what settling after costs.
+    function test_prepaidExactOutputBuyCostsTheSameAsSettlingAfter() public {
+        uint256 snap = vm.snapshotState();
+        Trade memory control = _trade(true, false, 500 ether, false, "");
+        vm.revertToState(snap);
+        Trade memory r = _prepaidTrade(true, false, 500 ether, 1000 ether);
+        _assertFee(r, true);
+        assertEq(r.coreToken, 500 ether);
+        assertEq(BalanceDelta.unwrap(r.userDelta), BalanceDelta.unwrap(control.userDelta), "same cost");
+        assertEq(r.deferred, control.paid, "same fee, deferred instead of delivered");
+        assertEq(r.paid, 0);
+    }
+
+    /// With SIMDTEST synced, a sell's IMD fee still goes straight to the wallet.
+    function test_prepaidSellsStillPayTheWalletDirectly() public {
+        Trade memory r = _prepaidTrade(false, true, 100 ether, 100 ether);
+        _assertFee(r, false);
+        assertEq(r.coreToken, -100 ether);
+        assertGt(r.paid, 0);
+        assertEq(r.deferred, 0);
+        r = _prepaidTrade(false, false, 100 ether, 200 ether);
+        _assertFee(r, false);
+        assertEq(imd0 ? r.userDelta.amount0() : r.userDelta.amount1(), 100 ether);
+        assertGt(r.paid, 0);
+        assertEq(r.deferred, 0);
+    }
+
+    /// A buyer that settles its input before the swap closes the sync window; direct delivery resumes.
+    function test_buySettledBeforeSwapPaysTheWalletDirectly() public {
+        Trade memory r = _trade(true, true, 100 ether, false, "");
+        assertEq(r.paid, 0.75 ether);
+        assertEq(r.deferred, 0);
+    }
+
+    /// v4 adds the hook's fee to an exact-output sell with checked arithmetic. The hook names the
+    /// bound instead of letting the addition panic; every order at or below it fills.
+    function test_exactOutputSellBoundIsNamedAndEveryOrderBelowItFills() public {
+        SwapParams memory params = _params(false, false, 1, true);
+        params.amountSpecified = type(int256).max;
+        // v4 wraps a hook's revert with the hook address, callback selector and its own detail.
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.beforeSwap.selector,
+                abi.encodeWithSelector(TestHook.ExactOutputTooLarge.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        trader.swap(key, params, "");
+        uint256 snap = vm.snapshotState();
+        Trade memory atBound = _trade(false, false, hook.MAX_EXACT_OUTPUT_SELL(), true, "");
+        _assertFee(atBound, false);
+        assertGt(atBound.paid, 0);
+        vm.revertToState(snap);
+        Trade memory int128Max = _trade(false, false, uint256(uint128(type(int128).max)), true, "");
+        _assertFee(int128Max, false);
+        assertEq(BalanceDelta.unwrap(int128Max.userDelta), BalanceDelta.unwrap(atBound.userDelta));
+        assertEq(int128Max.paid, atBound.paid);
     }
 
     function test_tinyAmountsRoundDownWithoutBlocking() public {

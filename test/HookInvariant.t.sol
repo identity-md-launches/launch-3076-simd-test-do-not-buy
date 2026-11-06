@@ -9,6 +9,7 @@ import {MockIMD} from "./helpers/MockIMD.sol";
 import {TestHook} from "../src/TestHook.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
@@ -31,7 +32,8 @@ contract FeeHandler is Test {
         key = key_;
     }
 
-    function swap(bool buy, bool exactInput, uint96 raw, bool partialFill) external {
+    /// @param prepaid Pay the input inside a sync window that brackets the swap instead of after it.
+    function swap(bool buy, bool exactInput, uint96 raw, bool partialFill, bool prepaid) external {
         uint256 amount = bound(raw, 1, 100 ether);
         IPoolManager manager = hook.poolManager();
         (, int24 tick,,) = manager.getSlot0(key.toId());
@@ -39,8 +41,15 @@ contract FeeHandler is Test {
             ? TickMath.getSqrtPriceAtTick(tick + (buy ? int24(-1) : int24(1)))
             : (buy ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1);
         uint256 imdBefore = IERC20(hook.IMD()).balanceOf(address(trader));
+        SwapParams memory params = SwapParams(buy, exactInput ? -int256(amount) : int256(amount), limit);
         vm.recordLogs();
-        trader.swap(key, SwapParams(buy, exactInput ? -int256(amount) : int256(amount), limit), hex"ff");
+        if (prepaid) {
+            // Deep liquidity keeps the price near 1:1, so twice the amount always covers the input.
+            Currency input = buy ? key.currency0 : key.currency1;
+            trader.swapPrepaid(key, params, input, exactInput ? amount : 2 * amount + 1);
+        } else {
+            trader.swap(key, params, hex"ff");
+        }
         Vm.Log[] memory logs = vm.getRecordedLogs();
         uint256 gross;
         if (buy) {

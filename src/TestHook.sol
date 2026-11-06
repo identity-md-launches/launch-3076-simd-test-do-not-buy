@@ -11,6 +11,7 @@ import {PoolId} from "v4-core/src/types/PoolId.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, toBeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
+import {TransientStateLibrary} from "v4-core/src/libraries/TransientStateLibrary.sol";
 
 /// @notice Immutable 75-basis-point IMD fee on this launch's SIMDTEST/IMD pool.
 /// @dev No owner, admin, setters, upgrade mechanism, time logic, or fee conversion.
@@ -21,6 +22,10 @@ contract TestHook is IUnlockCallback {
     uint256 public constant BPS = 10_000;
     uint24 public constant LP_FEE = 12_500;
     int24 public constant TICK_SPACING = 60;
+    /// @notice Largest exact-output sell (net IMD requested) the hook accepts. v4 adds the hook's
+    /// specified-side fee to the request with checked arithmetic; the fee is always below int128.
+    uint256 public constant MAX_EXACT_OUTPUT_SELL =
+        uint256(type(int256).max) - uint256(uint128(type(int128).max));
 
     IPoolManager public immutable poolManager;
     address public immutable token;
@@ -33,6 +38,7 @@ contract TestHook is IUnlockCallback {
     error WrongPool();
     error QuoteResult(int256 delta);
     error UnexpectedQuoteResult();
+    error ExactOutputTooLarge();
 
     /// @param deferred True when the IMD is held as a redeemable PoolManager claim.
     event FeeCharged(uint256 amount, bool deferred);
@@ -100,6 +106,9 @@ contract TestHook is IUnlockCallback {
         if (buy) {
             quoted.amountSpecified += int256(maximumFee);
         } else {
+            // Above this bound v4's `amountSpecified + fee` would panic; no pool can fill such an
+            // order anyway (an IMD fill never exceeds int128), so refuse it with a named error.
+            if (requested > MAX_EXACT_OUTPUT_SELL) revert ExactOutputTooLarge();
             uint256 room = uint256(type(int256).max) - requested;
             quoted.amountSpecified += int256(maximumFee < room ? maximumFee : room);
         }
@@ -162,6 +171,14 @@ contract TestHook is IUnlockCallback {
     function _pay(uint256 fee) private {
         if (fee == 0) return;
         Currency imd = Currency.wrap(IMD);
+        // settle() credits a payer with balance minus the reserves recorded by its last sync().
+        // A take of IMD while a caller has IMD synced (sync -> transfer -> swap -> settle) would
+        // shrink that credit by the fee, so the fee is kept as a claim until the window is closed.
+        if (TransientStateLibrary.getSyncedCurrency(poolManager) == imd) {
+            poolManager.mint(address(this), imd.toId(), fee);
+            emit FeeCharged(fee, true);
+            return;
+        }
         // A swap's input may not yet be settled, or the external pair token may refuse a payout.
         // Reverting take rolls back its delta too; minting the same claim then settles our fee.
         try poolManager.take(imd, FEE_RECIPIENT, fee) {
