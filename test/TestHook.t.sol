@@ -153,6 +153,49 @@ abstract contract HookScenarios is HookFixture {
         }
     }
 
+    /// Settles the dust finding: the zero-fee range is exactly what floor(gross * 75 / 10000) gives,
+    /// and it ends at 134 wei of gross IMD. The trader never pays more than the requested amount.
+    function test_dustFeeBoundaryIsExactlyOneHundredThirtyFourWeiOfGrossIMD() public {
+        Trade memory buyBelow = _trade(true, true, 133, false, "");
+        _assertFee(buyBelow, true);
+        assertEq(imd0 ? buyBelow.userDelta.amount0() : buyBelow.userDelta.amount1(), -133);
+        assertEq(buyBelow.paid + buyBelow.deferred, 0);
+
+        Trade memory buyAtBoundary = _trade(true, true, 134, false, "");
+        _assertFee(buyAtBoundary, true);
+        assertEq(imd0 ? buyAtBoundary.userDelta.amount0() : buyAtBoundary.userDelta.amount1(), -134);
+        assertEq(buyAtBoundary.paid, 1);
+
+        // An exact-output sell of N net IMD pulls N + floor(N * 75 / 9925) gross from the pool.
+        Trade memory sellBelow = _trade(false, false, 132, false, "");
+        _assertFee(sellBelow, false);
+        assertEq(sellBelow.coreImd, 132);
+        assertEq(sellBelow.paid + sellBelow.deferred, 0);
+
+        Trade memory sellAtBoundary = _trade(false, false, 133, false, "");
+        _assertFee(sellAtBoundary, false);
+        assertEq(sellAtBoundary.coreImd, 134);
+        assertEq(imd0 ? sellAtBoundary.userDelta.amount0() : sellAtBoundary.userDelta.amount1(), 133);
+        assertEq(sellAtBoundary.paid, 1);
+    }
+
+    /// Settles the 2% finding: the rates the brief fixes are charged on different bases. A 1000 IMD
+    /// buy pays 7.5 IMD to the wallet and 1.25% of the remaining 992.5 IMD to the pool, 19.90625 IMD.
+    function test_hookAndPoolFeesOnABuyCompoundToTheDocumentedTotal() public {
+        Trade memory r = _trade(true, true, 1000 ether, false, "");
+        assertEq(imd0 ? r.userDelta.amount0() : r.userDelta.amount1(), -1000 ether);
+        assertEq(r.paid, 7.5 ether);
+        assertEq(r.coreImd, -992.5 ether);
+
+        BalanceDelta collected = lp.modify(key, ModifyLiquidityParams(LOWER, UPPER, 0, bytes32(0)));
+        int128 lpImd = imd0 ? collected.amount0() : collected.amount1();
+        int128 lpToken = imd0 ? collected.amount1() : collected.amount0();
+        assertEq(lpToken, 0, "a buy's pool fee is charged in IMD");
+        // The pool's own wei rounding on price and fee growth is the only tolerance needed.
+        assertApproxEqAbs(uint256(int256(lpImd)), 12.40625 ether, 1e6);
+        assertApproxEqAbs(r.paid + uint256(int256(lpImd)), 19.90625 ether, 1e6);
+    }
+
     function test_exhaustedLiquidityChargesNoPhantomFee() public {
         lp.modify(key, ModifyLiquidityParams(LOWER, UPPER, -LIQUIDITY, bytes32(0)));
         for (uint256 mode; mode < 4; ++mode) {
